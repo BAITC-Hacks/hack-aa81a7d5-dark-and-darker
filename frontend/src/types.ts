@@ -4,7 +4,7 @@ export type TaskFields = Record<CriterionField, string> & { title: string; initi
 export type Task = TaskFields & {
   id: number; business_id: number; organization: string; business_name: string;
   readiness_score: number; readiness_level: string; status: 'draft' | 'published';
-  is_confirmed: boolean; created_at: string; updated_at: string;
+  is_confirmed: boolean; created_at: string; updated_at: string; revision: number; wizard_state: WizardState | null;
 };
 export type Team = { id: number; name: string; description: string; skills: string[]; members_count: number; contact: string };
 export type Proposal = {
@@ -18,6 +18,11 @@ export type Answers = Record<CriterionField, string>;
 export type GenerationInfo = { source: 'ai' | 'fallback'; reason: string | null; message: string };
 export type QuestionsResult = GenerationInfo & { questions: AIQuestion[] };
 export type CardResult = GenerationInfo & { card: TaskFields };
+export type WizardState = {
+  step: number; fields: TaskFields; originalIdea: TaskFields; answers: Answers;
+  questionSet: { questions: AIQuestion[] }; hasQuestions: boolean; hasCard: boolean;
+  questionsIdea: string; questionInfo: GenerationInfo | null; cardInfo: GenerationInfo | null;
+};
 export type Readiness = { score: number; level: string; criteria: { field: CriterionField; label: string; maximum: number; points: number }[]; missing: string[]; recommendations: string[] };
 export const emptyFields: TaskFields = {
   title: '', initial_description: '', context: '', materials: '', expected_result: '', success_criteria: '',

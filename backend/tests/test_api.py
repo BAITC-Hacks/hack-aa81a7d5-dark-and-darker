@@ -9,16 +9,36 @@ import sys
 import tempfile
 import time
 import unittest
+from uuid import uuid4
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from backend.app.readiness import CRITERIA, calculate_readiness
+from backend.app.db import database, initialize_database
+from backend.app.seed import seed_database
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_additive_migration_preserves_existing_tasks_and_proposals(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HACKALEM_DB_PATH": str(Path(directory) / "migration.db")}):
+            seed_database()
+            with database() as db:
+                db.execute("DROP TABLE wizard_states")
+                db.execute("ALTER TABLE tasks DROP COLUMN revision")
+                before = [dict(row) for row in db.execute("SELECT * FROM tasks")]
+                proposals = [dict(row) for row in db.execute("SELECT * FROM proposals")]
+            initialize_database()
+            initialize_database()
+            with database() as db:
+                after = [dict(row) for row in db.execute("SELECT * FROM tasks")]
+                self.assertTrue(all(row.pop("revision") == 1 for row in after))
+                self.assertEqual(before, after)
+                self.assertEqual(proposals, [dict(row) for row in db.execute("SELECT * FROM proposals")])
+
     def test_all_combinations_and_levels(self):
         for included in itertools.product([False, True], repeat=7):
             fields = {criterion[0]: "Содержательная информация" if present else " \n\t "
@@ -97,9 +117,104 @@ class ApiTests(unittest.TestCase):
     def create(self, **fields):
         return self.request("POST", "/tasks", {"title": "Проверочная задача", "initial_description": "Описание задачи", **fields}, expected=201)
 
+    def wizard_state(self):
+        fields = {"title": "Устойчивый черновик", "initial_description": "Первоначальное описание",
+                  **{item[0]: "" for item in CRITERIA}}
+        return {"step": 2, "fields": fields, "originalIdea": fields.copy(),
+                "answers": {item[0]: "" for item in CRITERIA},
+                "questionSet": {"questions": [{"field": item[0], "question": f"Уточнение AI: {item[0]}?"} for item in CRITERIA]},
+                "hasQuestions": True, "hasCard": False, "questionsIdea": "Исходная идея",
+                "questionInfo": {"source": "ai", "reason": None, "message": "Mock AI"}, "cardInfo": None}
+
+    def test_late_ai_save_conflicts_atomically_with_manual_edit(self):
+        state = self.wizard_state()
+        task = self.request("POST", "/wizard-drafts", {"client_id": str(uuid4()), "state": state})
+        path = f'/tasks/{task["id"]}'
+        latest = self.request("PATCH", path, {"expected_revision": task["revision"], "context": "Новая ручная правка"})
+        state["fields"]["context"] = "Устаревший mock AI"
+        self.request("PUT", path + "/wizard", {"expected_revision": task["revision"], "state": state}, expected=409)
+        self.assertEqual(latest, self.request("GET", path))
+        self.assertIsNone(latest["wizard_state"])
+
+    def test_wizard_persistence_idempotent_creation_and_publication(self):
+        state = self.wizard_state()
+        state["answers"]["context"] = "  исходный ответ пользователя  "
+        state["fields"]["context"] = "AI-формулировка"
+        body = {"client_id": str(uuid4()), "state": state}
+        before = len(self.request("GET", "/tasks"))
+        task = self.request("POST", "/wizard-drafts", body)
+        self.assertEqual(task, self.request("POST", "/wizard-drafts", body))
+        self.assertEqual(len(self.request("GET", "/tasks")), before + 1)
+        self.assertEqual(task["wizard_state"], state)
+        state["step"] = 4
+        path = f'/tasks/{task["id"]}'
+        saved = self.request("PUT", path + "/wizard", {"expected_revision": task["revision"], "state": state})
+        self.assertEqual(saved["wizard_state"], state)
+        self.stop_server()
+        self.start_server()
+        self.assertEqual(saved, self.request("GET", path))
+        published = self.publish(saved)
+        self.assertEqual(published["readiness_score"], 20)
+        state["fields"]["materials"] = "Новые материалы"
+        edited = self.request("PUT", path + "/wizard", {"expected_revision": published["revision"], "state": state})
+        self.assertFalse(edited["is_confirmed"])
+        self.assertEqual(edited["status"], "draft")
+        self.assertEqual(edited["readiness_score"], 40)
+        self.request("POST", path + "/publish", {"expected_revision": edited["revision"]}, expected=409)
+
+    def test_wizard_empty_required_field_recovery_and_snapshot_conflicts(self):
+        state = self.wizard_state()
+        task = self.request("POST", "/wizard-drafts", {"client_id": str(uuid4()), "state": state})
+        path = f'/tasks/{task["id"]}/wizard'
+        state["fields"]["title"] = ""
+        edited = self.request("PUT", path, {"expected_revision": task["revision"], "state": state})
+        self.assertEqual(edited["wizard_state"]["fields"]["title"], "")
+        self.assertTrue(edited["title"])
+        self.request("PUT", path, {"expected_revision": task["revision"], "state": state}, expected=409)
+        self.request("PUT", path, {"state": state}, expected=422)
+
     def publish(self, task):
-        self.request("POST", f'/tasks/{task["id"]}/confirm')
-        return self.request("POST", f'/tasks/{task["id"]}/publish')
+        confirmed = self.request("POST", f'/tasks/{task["id"]}/confirm', {"expected_revision": task["revision"]})
+        return self.request("POST", f'/tasks/{task["id"]}/publish', {"expected_revision": confirmed["revision"]})
+
+    def test_stale_confirmation_and_publication_require_reviewed_revision(self):
+        opened = self.create()
+        path = f'/tasks/{opened["id"]}'
+        edited = self.request("PATCH", path, {"expected_revision": opened["revision"], "title": "Изменено в другой вкладке"})
+        conflict = self.request("POST", path + "/confirm", {"expected_revision": opened["revision"]}, expected=409)
+        self.assertEqual(conflict["detail"], "Карточка была изменена в другой вкладке. Откройте актуальную версию и проверьте изменения перед подтверждением.")
+        self.assertEqual(edited, self.request("GET", path))
+        self.assertFalse(edited["is_confirmed"])
+        self.request("POST", path + "/publish", {"expected_revision": edited["revision"]}, expected=409)
+        reviewed = self.request("GET", path)
+        confirmed = self.request("POST", path + "/confirm", {"expected_revision": reviewed["revision"]})
+        self.assertTrue(confirmed["is_confirmed"])
+        # The old tab cannot publish even after another tab confirmed the new card.
+        self.request("POST", path + "/publish", {"expected_revision": opened["revision"]}, expected=409)
+        self.assertEqual(confirmed, self.request("GET", path))
+        published = self.request("POST", path + "/publish", {"expected_revision": confirmed["revision"]})
+        self.assertEqual(published["readiness_score"], 0)
+        self.assertEqual(published["status"], "published")
+
+    def test_stale_edit_cannot_overwrite_or_reset_confirmation(self):
+        opened = self.create()
+        current = self.publish(opened)
+        path = f'/tasks/{opened["id"]}'
+        self.request("PATCH", path, {"expected_revision": opened["revision"], "context": "Старый текст"}, expected=409)
+        self.assertEqual(current, self.request("GET", path))
+        edited = self.request("PATCH", path, {"expected_revision": current["revision"], "context": "Новые сведения"})
+        self.assertFalse(edited["is_confirmed"])
+        self.assertEqual(edited["status"], "draft")
+        self.request("POST", path + "/publish", {"expected_revision": current["revision"]}, expected=409)
+        self.assertEqual(edited, self.request("GET", path))
+
+    def test_task_mutations_require_a_valid_explicit_version(self):
+        task = self.create()
+        path = f'/tasks/{task["id"]}'
+        for method, endpoint in [("PATCH", path), ("POST", path + "/confirm"), ("POST", path + "/publish")]:
+            for body in [None, {}, {"expected_revision": None}, {"expected_revision": 0}, {"expected_revision": True}, {"expected_revision": "1"}]:
+                self.request(method, endpoint, body, expected=422)
+        self.assertEqual(task, self.request("GET", path))
 
     def proposal(self, task, team_id=1, **kwargs):
         return self.request("POST", f'/tasks/{task["id"]}/proposals',
@@ -129,16 +244,17 @@ class ApiTests(unittest.TestCase):
         task = self.create()
         path = f'/tasks/{task["id"]}'
         self.assertEqual(task["readiness_score"], 0)
-        self.request("POST", path + "/publish", expected=409)
-        self.assertEqual(self.publish(task)["status"], "published")
+        self.request("POST", path + "/publish", {"expected_revision": task["revision"]}, expected=409)
+        published = self.publish(task)
+        self.assertEqual(published["status"], "published")
         # A no-op edit does not invalidate confirmation.
-        unchanged = self.request("PATCH", path, {"title": task["title"]})
+        unchanged = self.request("PATCH", path, {"expected_revision": published["revision"], "title": task["title"]})
         self.assertTrue(unchanged["is_confirmed"])
-        edited = self.request("PATCH", path, {"context": "Новый бизнес-контекст"})
+        edited = self.request("PATCH", path, {"expected_revision": unchanged["revision"], "context": "Новый бизнес-контекст"})
         self.assertFalse(edited["is_confirmed"])
         self.assertEqual(edited["status"], "draft")
         self.assertEqual(edited["readiness_score"], 20)
-        self.request("POST", path + "/publish", expected=409)
+        self.request("POST", path + "/publish", {"expected_revision": edited["revision"]}, expected=409)
         self.publish(edited)
         rating = self.request("GET", path + "/readiness")
         self.assertEqual(rating["score"], 20)
@@ -171,8 +287,8 @@ class ApiTests(unittest.TestCase):
         self.request("POST", "/tasks", {"title": "  ", "initial_description": "описание"}, expected=422)
         self.request("POST", "/tasks", {"title": "Название", "initial_description": "  "}, expected=422)
         task = self.create()
-        self.request("PATCH", f'/tasks/{task["id"]}', {"context": None}, expected=422)
-        self.request("PATCH", f'/tasks/{task["id"]}', {"status": "published"}, expected=422)
+        self.request("PATCH", f'/tasks/{task["id"]}', {"expected_revision": task["revision"], "context": None}, expected=422)
+        self.request("PATCH", f'/tasks/{task["id"]}', {"expected_revision": task["revision"], "status": "published"}, expected=422)
         self.request("POST", f'/tasks/{task["id"]}/proposals', {"team_id": 999999, "message": "test", "proposed_solution": "test"}, expected=404)
         for field in ["message", "proposed_solution"]:
             body = {"team_id": 1, "message": "Сообщение", "proposed_solution": "Решение", field: " \n "}
@@ -180,8 +296,8 @@ class ApiTests(unittest.TestCase):
         for path in ["/tasks?status=wrong", "/tasks?readiness_level=wrong", "/tasks?sort=wrong"]:
             self.request("GET", path, expected=422)
         self.request("PATCH", "/proposals/999999/status", {"status": "accepted"}, expected=404)
-        self.request("POST", "/tasks/999999/confirm", expected=404)
-        self.request("PATCH", "/tasks/999999", {"title": "Название"}, expected=404)
+        self.request("POST", "/tasks/999999/confirm", {"expected_revision": 1}, expected=404)
+        self.request("PATCH", "/tasks/999999", {"expected_revision": 1, "title": "Название"}, expected=404)
 
     def test_sorting_filtering_and_russian_search(self):
         for sort, reverse in [("score_asc", False), ("score_desc", True)]:

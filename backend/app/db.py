@@ -63,6 +63,14 @@ def initialize_database():
                 created_at TEXT NOT NULL, UNIQUE(task_id, team_id)
             );
             CREATE TABLE IF NOT EXISTS seed_runs (name TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS wizard_states (
+                task_id INTEGER PRIMARY KEY REFERENCES tasks(id),
+                client_id TEXT UNIQUE,
+                data TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_proposals_team ON proposals(team_id);
         """)
+        # Additive migration: keep existing tasks, proposals and seed history.
+        if "revision" not in {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}:
+            db.execute("ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")

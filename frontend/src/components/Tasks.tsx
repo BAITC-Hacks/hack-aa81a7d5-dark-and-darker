@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { send, useResource } from '../api';
+import { ApiError, send, taskConflictMessage, useResource } from '../api';
 import { useAction, useHub } from '../context';
 import { date, levels, type Proposal, type Readiness, type Task } from '../types';
 import { CardContent, Empty, ErrorState, Loading, ReadinessPanel, Score, TeamSelect } from './ui';
@@ -42,6 +42,18 @@ export function TaskPage({ taskId }: { taskId: number }) {
   const rating = useResource<Readiness>(`/tasks/${taskId}/readiness`, revision);
   const proposals = useResource<Proposal[]>(role === 'business' ? `/tasks/${taskId}/proposals` : `/teams/${teamId}/proposals`, revision);
   const { busy, run } = useAction();
+  const [conflict, setConflict] = useState(false);
+  async function changeStatus(action: 'confirm' | 'publish') {
+    if (!task.data || conflict) return;
+    try {
+      await send(`/tasks/${taskId}/${action}`, 'POST', { expected_revision: task.data.revision });
+      notify(action === 'confirm' ? 'Карточка подтверждена' : 'Задача опубликована и доступна студентам');
+      refresh();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) setConflict(true);
+      else throw error;
+    }
+  }
   const items = proposals.data?.filter((item) => item.task_id === taskId) ?? [];
   if (task.loading || rating.loading) return <Loading />;
   if (task.error) return <ErrorState message={task.error} retry={task.retry} />;
@@ -52,11 +64,12 @@ export function TaskPage({ taskId }: { taskId: number }) {
   return <>
     <button className="back-link" onClick={() => navigate('tasks')}>← {role === 'business' ? 'Мои задачи' : 'Каталог задач'}</button>
     <div className="page-heading"><div><p className="eyebrow">{data.organization} · ЗАДАЧА №{data.id}</p><h1>{data.title}</h1><div className="actions"><span className={`badge ${data.status}`}>{data.status === 'published' ? 'Опубликована' : 'Черновик'}</span><span className="muted small">Создана {date(data.created_at)}</span></div></div></div>
+    {conflict && <div className="info fallback-info" role="alert"><p>{taskConflictMessage}</p><button onClick={() => { setConflict(false); task.retry(); rating.retry(); }}>Открыть актуальную версию</button></div>}
     <div className="detail-grid"><div>
       {role === 'business' && <section className="panel publish-panel"><div><h3>{data.is_confirmed ? 'Карточка подтверждена' : 'Ожидает вашего подтверждения'}</h3><p className="muted small">{data.is_confirmed ? 'Можно публиковать задачу независимо от рейтинга.' : 'Проверьте сведения. Для публикации подтвердите текущую версию.'}</p></div><div className="actions">
         <button className="secondary" disabled={busy} onClick={() => navigate(`edit/${taskId}`)}>Редактировать</button>
-        {!data.is_confirmed && <button disabled={busy} onClick={() => void run(async () => { await send(`/tasks/${taskId}/confirm`, 'POST'); notify('Карточка подтверждена'); refresh(); })}>Подтвердить карточку</button>}
-        {data.status !== 'published' && <button disabled={busy || !data.is_confirmed} onClick={() => void run(async () => { await send(`/tasks/${taskId}/publish`, 'POST'); notify('Задача опубликована и доступна студентам'); refresh(); })}>Опубликовать</button>}
+        {!data.is_confirmed && <button disabled={busy || conflict} onClick={() => void run(() => changeStatus('confirm'))}>Подтвердить карточку</button>}
+        {data.status !== 'published' && <button disabled={busy || conflict || !data.is_confirmed} onClick={() => void run(() => changeStatus('publish'))}>Опубликовать</button>}
       </div></section>}
       <section className="panel"><CardContent fields={data} /></section>
       <section className="task-proposals"><h2>{role === 'business' ? 'Предложения по задаче' : 'Ваше предложение'}</h2>

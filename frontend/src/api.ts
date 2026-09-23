@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
 
+export const taskConflictMessage = 'Карточка была изменена в другой вкладке. Откройте актуальную версию и проверьте изменения перед подтверждением.';
+
+export class ApiError extends Error {
+  constructor(message: string, public status: number) { super(message); }
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;
   try {
@@ -14,9 +20,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     const detail = body.detail;
-    throw new Error(typeof detail === 'string' ? detail : response.status === 422
+    throw new ApiError(typeof detail === 'string' ? detail : response.status === 422
       ? 'Проверьте поля формы: обязательные поля не могут быть пустыми, текст — длиннее 10 000 символов.'
-      : `Не удалось выполнить запрос (${response.status}). Попробуйте ещё раз.`);
+      : `Не удалось выполнить запрос (${response.status}). Попробуйте ещё раз.`, response.status);
   }
   return response.json() as Promise<T>;
 }

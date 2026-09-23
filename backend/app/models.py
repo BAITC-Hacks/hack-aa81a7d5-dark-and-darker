@@ -23,7 +23,11 @@ class TaskCreate(InputModel):
     business_contact: Text = ""
 
 
-class TaskPatch(InputModel):
+class TaskVersion(InputModel):
+    expected_revision: int = Field(ge=1, strict=True)
+
+
+class TaskPatch(TaskVersion):
     title: Title | None = None
     initial_description: RequiredText | None = None
     context: Text | None = None

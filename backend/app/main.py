@@ -7,9 +7,10 @@ from fastapi import FastAPI, HTTPException, Query
 
 from .ai import router as ai_router
 from .db import database, now
-from .models import ProposalCreate, ProposalStatus, TaskCreate, TaskPatch
+from .models import ProposalCreate, ProposalStatus, TaskCreate, TaskPatch, TaskVersion
 from .readiness import calculate_readiness, generate_questions
 from .seed import BUSINESS_ID, seed_database
+from .wizard_models import WizardCreate, WizardSave
 
 
 @asynccontextmanager
@@ -29,12 +30,19 @@ def get_task(db, task_id: int) -> dict:
         raise HTTPException(404, "Задача не найдена")
     task = dict(row)
     task["is_confirmed"] = bool(task["is_confirmed"])
+    state = db.execute("SELECT data FROM wizard_states WHERE task_id=?", (task_id,)).fetchone()
+    task["wizard_state"] = json.loads(state["data"]) if state and state["data"] else None
     return task
 
 
 def require_owner(task: dict):
     if task["business_id"] != BUSINESS_ID:
         raise HTTPException(403, "Можно изменять только задачи демонстрационного бизнеса")
+
+
+def require_revision(task: dict, expected_revision: int):
+    if task["revision"] != expected_revision:
+        raise HTTPException(409, "Карточка была изменена в другой вкладке. Откройте актуальную версию и проверьте изменения перед подтверждением.")
 
 
 def get_team(db, team_id: int) -> dict:
@@ -115,38 +123,86 @@ def create_task(body: TaskCreate):
 
 @app.patch("/api/tasks/{task_id}", tags=["tasks"])
 def update_task(task_id: int, body: TaskPatch):
-    values = body.model_dump(exclude_unset=True)
+    values = body.model_dump(exclude_unset=True, exclude={"expected_revision"})
     with database(write=True) as db:
         task = get_task(db, task_id)
         require_owner(task)
+        require_revision(task, body.expected_revision)
         changes = {key: value for key, value in values.items() if task[key] != value}
         if changes:
             readiness = calculate_readiness({**task, **changes})
             changes.update(is_confirmed=0, status="draft", readiness_score=readiness["score"],
-                           readiness_level=readiness["level"], updated_at=now())
+                           readiness_level=readiness["level"], updated_at=now(), revision=task["revision"] + 1)
             db.execute(f"UPDATE tasks SET {','.join(key + '=?' for key in changes)} WHERE id=?", (*changes.values(), task_id))
+            # A separate/manual edit invalidates the old recovery snapshot.
+            db.execute("UPDATE wizard_states SET data=NULL WHERE task_id=?", (task_id,))
+        return get_task(db, task_id)
+
+
+@app.post("/api/wizard-drafts", tags=["tasks"])
+def create_wizard(body: WizardCreate):
+    with database(write=True) as db:
+        existing = db.execute("SELECT task_id FROM wizard_states WHERE client_id=?", (str(body.client_id),)).fetchone()
+        if existing:
+            return get_task(db, existing["task_id"])
+        if not body.state.fields.title.strip() or not body.state.fields.initial_description.strip():
+            raise HTTPException(422, "Укажите название и краткое описание задачи")
+        values = TaskCreate.model_validate(body.state.fields.model_dump()).model_dump()
+        readiness = calculate_readiness(values)
+        values.update(business_id=BUSINESS_ID, readiness_score=readiness["score"], readiness_level=readiness["level"],
+                      created_at=now(), updated_at=now())
+        cursor = db.execute(f"INSERT INTO tasks ({','.join(values)}) VALUES ({','.join('?' for _ in values)})", tuple(values.values()))
+        db.execute("INSERT INTO wizard_states (task_id,client_id,data) VALUES (?,?,?)",
+                   (cursor.lastrowid, str(body.client_id), body.state.model_dump_json()))
+        return get_task(db, cursor.lastrowid)
+
+
+@app.put("/api/tasks/{task_id}/wizard", tags=["tasks"])
+def save_wizard(task_id: int, body: WizardSave):
+    # BEGIN IMMEDIATE holds the lock across the version check and both writes.
+    with database(write=True) as db:
+        task = get_task(db, task_id)
+        require_owner(task)
+        require_revision(task, body.expected_revision)
+        state = body.state.model_dump()
+        if task["wizard_state"] == state:
+            return task
+        fields = state["fields"]
+        # Even temporarily empty required fields survive reload in the snapshot.
+        values = TaskCreate.model_validate(fields).model_dump() if fields["title"].strip() and fields["initial_description"].strip() else {}
+        changes = {key: value for key, value in values.items() if task[key] != value}
+        previous_fields = (task["wizard_state"] or {}).get("fields", {key: task[key] for key in fields})
+        if changes or fields != previous_fields:
+            readiness = calculate_readiness({**task, **changes})
+            changes.update(is_confirmed=0, status="draft", readiness_score=readiness["score"], readiness_level=readiness["level"])
+        changes.update(revision=task["revision"] + 1, updated_at=now())
+        db.execute(f"UPDATE tasks SET {','.join(key + '=?' for key in changes)} WHERE id=?", (*changes.values(), task_id))
+        db.execute("INSERT INTO wizard_states (task_id,data) VALUES (?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data",
+                   (task_id, body.state.model_dump_json()))
         return get_task(db, task_id)
 
 
 @app.post("/api/tasks/{task_id}/confirm", tags=["tasks"])
-def confirm_task(task_id: int):
+def confirm_task(task_id: int, body: TaskVersion):
     with database(write=True) as db:
         task = get_task(db, task_id)
         require_owner(task)
+        require_revision(task, body.expected_revision)
         readiness = calculate_readiness(task)
-        db.execute("UPDATE tasks SET is_confirmed=1,readiness_score=?,readiness_level=?,updated_at=? WHERE id=?",
+        db.execute("UPDATE tasks SET is_confirmed=1,readiness_score=?,readiness_level=?,updated_at=?,revision=revision+1 WHERE id=?",
                    (readiness["score"], readiness["level"], now(), task_id))
         return get_task(db, task_id)
 
 
 @app.post("/api/tasks/{task_id}/publish", tags=["tasks"])
-def publish_task(task_id: int):
+def publish_task(task_id: int, body: TaskVersion):
     with database(write=True) as db:
         task = get_task(db, task_id)
         require_owner(task)
+        require_revision(task, body.expected_revision)
         if not task["is_confirmed"]:
             raise HTTPException(409, "Сначала подтвердите текущую версию карточки")
-        db.execute("UPDATE tasks SET status='published',updated_at=? WHERE id=?", (now(), task_id))
+        db.execute("UPDATE tasks SET status='published',updated_at=?,revision=revision+1 WHERE id=?", (now(), task_id))
         return get_task(db, task_id)
 
 

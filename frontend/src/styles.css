@@ -1,6 +1,8 @@
 :root { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #272a41; background: #f6f7fb; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; --accent: #6154d9; --muted: #767b90; --border: #e8eaf2; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 360px; }
+.leave-dialog { border: 1px solid var(--border); border-radius: 14px; padding: 28px; max-width: min(560px, 90vw); color: inherit; }
+.leave-dialog::backdrop { background: #272a4166; }
 button, input, select, textarea { font: inherit; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 button { border: 1px solid transparent; border-radius: 9px; background: var(--accent); color: #fff; padding: 11px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s; }
