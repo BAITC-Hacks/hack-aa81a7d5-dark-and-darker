@@ -13,6 +13,11 @@ export type Proposal = {
   task_title: string; task_status: Task['status']; team_name: string; team_skills: string[]; team_contact: string;
 };
 export type Question = { field: CriterionField; label: string; weight: number; question: string };
+export type AIQuestion = Pick<Question, 'field' | 'question'>;
+export type Answers = Record<CriterionField, string>;
+export type GenerationInfo = { source: 'ai' | 'fallback'; reason: string | null; message: string };
+export type QuestionsResult = GenerationInfo & { questions: AIQuestion[] };
+export type CardResult = GenerationInfo & { card: TaskFields };
 export type Readiness = { score: number; level: string; criteria: { field: CriterionField; label: string; maximum: number; points: number }[]; missing: string[]; recommendations: string[] };
 export const emptyFields: TaskFields = {
   title: '', initial_description: '', context: '', materials: '', expected_result: '', success_criteria: '',

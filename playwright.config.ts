@@ -12,7 +12,7 @@ export default defineConfig({
     {
       command: '.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8001',
       url: 'http://127.0.0.1:8001/api/health',
-      env: { HACKALEM_DB_PATH: process.env.HACKALEM_TEST_DB },
+      env: { HACKALEM_DB_PATH: process.env.HACKALEM_TEST_DB, OPENAI_API_KEY: '', OPENAI_MODEL: '' },
       reuseExistingServer: false,
     },
     {

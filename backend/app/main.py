@@ -5,6 +5,7 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 
+from .ai import router as ai_router
 from .db import database, now
 from .models import ProposalCreate, ProposalStatus, TaskCreate, TaskPatch
 from .readiness import calculate_readiness, generate_questions
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Sana Challenge Hub API", version="0.2.0", lifespan=lifespan)
+app.include_router(ai_router)
 
 
 def get_task(db, task_id: int) -> dict:

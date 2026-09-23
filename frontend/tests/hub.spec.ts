@@ -15,7 +15,7 @@ test('Полный сценарий: конструктор → публикац
   await expect(page.getByText('Операторы вручную распределяют 100 обращений каждый день.', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Назад', exact: true }).click();
   await expect(page.locator('textarea[name="materials"]')).toHaveValue('Есть обезличенная выгрузка заявок в CSV.');
-  await page.getByRole('button', { name: 'Сформировать карточку' }).click();
+  await page.getByRole('button', { name: 'Далее к карточке' }).click();
   await page.getByRole('button', { name: 'Далее' }).click();
   await page.getByLabel('Ожидаемый результат', { exact: true }).fill('Прототип классификатора обращений и отчёт о точности.');
   await page.getByRole('button', { name: 'Подтвердить карточку' }).click();

@@ -41,7 +41,7 @@ class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="hackalem-test-")
-        cls.env = {**os.environ, "HACKALEM_DB_PATH": str(Path(cls.temp.name) / "test.db")}
+        cls.env = {**os.environ, "HACKALEM_DB_PATH": str(Path(cls.temp.name) / "test.db"), "OPENAI_API_KEY": "", "OPENAI_MODEL": ""}
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             cls.port = sock.getsockname()[1]
