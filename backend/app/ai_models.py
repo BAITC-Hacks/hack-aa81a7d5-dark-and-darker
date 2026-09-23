@@ -1,6 +1,8 @@
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
+
+from .ai_checks import repeated_questions
 
 from .models import InputModel, RequiredText, Text, Title
 from .readiness import CRITERIA
@@ -29,6 +31,7 @@ class QuestionSet(InputModel):
 
 
 class Answers(InputModel):
+    model_config = ConfigDict(str_strip_whitespace=False, extra="forbid")
     context: Text
     materials: Text
     expected_result: Text
@@ -46,6 +49,26 @@ class GeneratedCard(QuestionInput, Answers):
     """All nine fields are required in the model's JSON; no rating/status fields."""
 
 
+class GeneratedQuestionSet(QuestionSet):
+    # Apply to newly generated questions only: older stored drafts remain editable.
+    @model_validator(mode="after")
+    def distinct_wording(self):
+        if repeated_questions([item.question for item in self.questions]):
+            raise ValueError("Вопросы повторяются или практически совпадают")
+        return self
+
+
+CardField = Literal["title", "initial_description", "context", "materials", "expected_result", "success_criteria", "constraints", "target_users", "business_contact"]
+
+
+class FieldReview(InputModel):
+    model_config = ConfigDict(str_strip_whitespace=False, extra="forbid")
+    original: Text
+    proposed: Text
+    requires_review: bool
+    warnings: list[str] = Field(default_factory=list, max_length=10)
+
+
 class GenerationInfo(InputModel):
     source: Literal["ai", "fallback"]
     reason: str | None = None
@@ -58,3 +81,4 @@ class QuestionsResult(GenerationInfo, QuestionSet):
 
 class CardResult(GenerationInfo):
     card: GeneratedCard
+    review: dict[CardField, FieldReview] | None = None

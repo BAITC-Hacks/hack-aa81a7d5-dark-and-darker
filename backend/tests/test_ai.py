@@ -13,7 +13,7 @@ from openai import (
     InternalServerError, NotFoundError, OpenAI, PermissionDeniedError, RateLimitError,
 )
 
-from backend.app.ai_models import GeneratedCard, QuestionSet
+from backend.app.ai_models import GeneratedCard, GeneratedQuestionSet, QuestionSet
 from backend.app.config import AISettings, get_ai_settings
 from backend.app.main import app
 from backend.app.readiness import CRITERIA, calculate_readiness, generate_questions
@@ -68,14 +68,14 @@ class AIEndpointTests(unittest.IsolatedAsyncioTestCase):
         return response.json()
 
     async def test_questions_validated_sorted_and_model_from_settings(self):
-        self.reply(QuestionSet(questions=list(reversed(QUESTIONS))))
+        self.reply(GeneratedQuestionSet(questions=list(reversed(QUESTIONS))))
         result = await self.post("/questions", IDEA)
         self.assertEqual(result["source"], "ai")
         self.assertEqual(result["questions"], QUESTIONS)
         self.sdk.responses.parse.assert_called_once()
         request = self.sdk.responses.parse.call_args.kwargs
         self.assertEqual(request["model"], "configured-model")
-        self.assertIs(request["text_format"], QuestionSet)
+        self.assertIs(request["text_format"], GeneratedQuestionSet)
         self.assertFalse(request["store"])
         self.assertEqual(json.loads(request["input"]), IDEA)
         self.assertEqual(self.constructor.call_args.kwargs["max_retries"], 0)
@@ -105,7 +105,10 @@ class AIEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.reply(GeneratedCard(**model_card))
         result = await self.post("/task-card", CARD_INPUT)
         self.assertEqual(result["source"], "ai")
-        self.assertEqual(result["card"]["context"], model_card["context"])
+        self.assertEqual(result["card"]["context"], ANSWERS["context"])
+        self.assertEqual(result["review"]["context"]["proposed"], model_card["context"])
+        self.assertTrue(result["review"]["context"]["requires_review"])
+        self.assertEqual(result["review"]["context"]["warnings"], [])
         self.assertEqual(result["card"]["materials"], "")
         self.assertEqual(result["card"]["constraints"], "")
         self.assertEqual(result["card"]["business_contact"], ANSWERS["business_contact"])
@@ -115,6 +118,101 @@ class AIEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.reply(GeneratedCard(**{**CARD, "context": ""}))
         result = await self.post("/task-card", CARD_INPUT)
         self.assertEqual(result["card"]["context"], ANSWERS["context"])
+
+    async def test_duplicate_and_near_duplicate_question_wording_falls_back(self):
+        for texts in [
+            ["Уточните задачу?"] * 7,
+            [f"{index + 1}. УТОЧНИТЕ задачу?!" for index in range(7)],
+            ["Какие данные вашей компании нужны для решения этой задачи?"] * 6 + ["Какие данные вашей компании нужны для решения данной задачи?"],
+            ["?!"] + [q["question"] for q in QUESTIONS[1:]],
+        ]:
+            self.reply({"questions": [{**item, "question": text} for item, text in zip(QUESTIONS, texts)]})
+            result = await self.post("/questions", IDEA)
+            self.assertEqual(result["source"], "fallback")
+            self.assertEqual(result["questions"], QUESTIONS)
+        # Only one near-duplicate pair is enough; all other questions are valid.
+        questions = [dict(item) for item in QUESTIONS]
+        questions[0]["question"] = "Какие данные вашей компании нужны для решения этой задачи?"
+        questions[1]["question"] = "Какие данные вашей компании нужны для решения данной задачи?"
+        self.reply({"questions": questions})
+        self.assertEqual((await self.post("/questions", IDEA))["source"], "fallback")
+
+    async def test_individual_questions_with_shared_topic_are_accepted(self):
+        texts = [
+            "Почему ручной разбор отзывов мешает работе кофеен?",
+            "В каком формате доступны отзывы гостей кофеен?",
+            "Что команда должна передать вам по итогам анализа отзывов?",
+            "Как вы оцените полезность классификации жалоб гостей?",
+            "Какие ограничения доступа к отзывам нужно соблюдать?",
+            "Кто из сотрудников кофеен будет пользоваться отчётом?",
+            "С кем команда сможет обсуждать результаты исследования?",
+        ]
+        questions = [{**item, "question": text} for item, text in zip(QUESTIONS, texts)]
+        self.reply({"questions": questions})
+        result = await self.post("/questions", IDEA)
+        self.assertEqual(result["source"], "ai")
+        self.assertEqual(result["questions"], questions)
+
+    async def test_added_deadlines_budgets_and_unknowns_are_not_applied(self):
+        for original, proposed in [
+            ("Нужен прототип", "Нужен прототип за 2 недели"),
+            ("Есть бюджет", "Бюджет 100000 тенге"),
+            ("Сроки и бюджет пока не определены", "Срок разработки — 2 недели. Бюджет — 100000 тенге"),
+            ("Срок пока неизвестен", "Завершить к пятнице"),
+            ("Срок согласуем", "Завершить за две недели"),
+        ]:
+            with self.subTest(original=original, proposed=proposed):
+                answers = {**ANSWERS, "constraints": original}
+                self.reply({**CARD, "constraints": proposed})
+                result = await self.post("/task-card", {**CARD_INPUT, "answers": answers})
+                self.assertEqual(result["card"]["constraints"], original)
+                review = result["review"]["constraints"]
+                self.assertEqual(review["original"], original)
+                self.assertEqual(review["proposed"], proposed)
+                self.assertTrue(review["requires_review"])
+                if "100000" in proposed or "2" in proposed:
+                    self.assertTrue(any("числовые" in warning for warning in review["warnings"]))
+                if "неизвестен" in original or "не определены" in original:
+                    self.assertTrue(any("неопределённость" in warning for warning in review["warnings"]))
+
+    async def test_number_formatting_keeps_value_units_and_context(self):
+        for original, proposed, safe in [
+            ("Бюджет 100 000 тенге", "Бюджет 100000 тенге", True),
+            ("Объём 1,50 ГБ", "Объём 1.5 ГБ", True),
+            ("Цена 100\u202f000 тенге", "Цена 100000 тенге", True),
+            ("Срок 2 дня", "Срок 2 недели", False),
+            ("Срок не более 2 недель", "Срок более 2 недель", False),
+            ("Срок 2 дня, бюджет 100 тенге", "Срок 100 дней, бюджет 2 тенге", False),
+            ("Бюджет 100,000 тенге", "Бюджет 100000 тенге", False),
+            ("Бюджет 100,000 тенге", "Бюджет 100 тенге", False),
+            ("Бюджет 100.000 тенге", "Бюджет 100,000 тенге", False),
+            ("Объём 123456789012345678901234567891", "Объём 123456789012345678901234567892", False),
+        ]:
+            answers = {**ANSWERS, "constraints": original}
+            self.reply({**CARD, "constraints": proposed})
+            result = await self.post("/task-card", {**CARD_INPUT, "answers": answers})
+            self.assertEqual(result["review"]["constraints"]["requires_review"], not safe, (original, proposed))
+            self.assertEqual(result["card"]["constraints"], proposed if safe else original)
+            if safe:
+                self.assertEqual(result["review"]["constraints"]["warnings"], [])
+
+    async def test_facts_cannot_move_between_fields_or_into_title(self):
+        answers = {**ANSWERS, "constraints": "Срок 2 недели", "materials": "Данные уточним"}
+        self.reply({**CARD, "constraints": answers["constraints"], "materials": "Данные за 2 недели",
+                    "title": "Прототип за 2 недели", "initial_description": "Разработка на Python"})
+        result = await self.post("/task-card", {**CARD_INPUT, "answers": answers})
+        self.assertEqual(result["card"], {**IDEA, **answers})
+        self.assertEqual(set(result["review"]), set(CARD))
+        for field in ["materials", "title", "initial_description"]:
+            self.assertTrue(result["review"][field]["requires_review"])
+
+    async def test_unchanged_unknown_and_raw_answers_are_preserved(self):
+        answers = {**ANSWERS, "constraints": "Сроки пока неизвестны", "context": "  Исходный ответ\nс пробелами  "}
+        self.reply({**IDEA, **answers})
+        result = await self.post("/task-card", {**CARD_INPUT, "answers": answers})
+        self.assertEqual(result["card"]["constraints"], answers["constraints"])
+        self.assertFalse(result["review"]["constraints"]["requires_review"])
+        self.assertEqual(result["review"]["context"]["original"], answers["context"])
 
     async def test_invalid_card_and_model_assigned_score_fall_back(self):
         for value in [{"title": "Недостаточная карточка"}, {**CARD, "readiness_score": 100}, {**CARD, "title": ""}]:

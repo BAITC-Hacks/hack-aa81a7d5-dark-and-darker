@@ -48,7 +48,7 @@ function Wizard({ initial }: { initial?: Task }) {
     setGenerating('card');
     try {
       const result = await requestCard({ title: state.originalIdea.title, initial_description: state.originalIdea.initial_description }, state.questionSet.questions, answers, operation.signal);
-      await operation.apply({ fields: result.card, cardInfo: { source: result.source, reason: result.reason, message: result.message }, hasCard: true, step: nextStep });
+      await operation.apply({ fields: result.card, cardReview: result.review ?? null, cardInfo: { source: result.source, reason: result.reason, message: result.message }, hasCard: true, step: nextStep });
     } finally { operation.finish(); setGenerating(null); }
   }
   async function go(next: number) {
@@ -107,6 +107,26 @@ function Wizard({ initial }: { initial?: Task }) {
           {field('title', 'Название задачи')}{field('initial_description', 'Краткое описание')}
           {questions.map((question) => field(question.field, question.label))}
         </>}
+        {step >= 3 && state.cardReview && <section aria-label="Сравнение с AI" className="ai-review">
+          <h2>Исходные ответы и редакция AI</h2>
+          <p className="muted small">Сравнение последней генерации. Изменение формулировки само по себе не означает ошибку. Смысл новой редакции проверяете вы. Выбор текста не подтверждает карточку.</p>
+          {Object.entries(state.cardReview).map(([name, item]) => {
+            if (!item) return null;
+            const key = name as keyof TaskFields;
+            const label = key === 'title' ? 'Название задачи' : key === 'initial_description' ? 'Краткое описание' : questions.find((q) => q.field === key)?.label;
+            return <details key={key} data-review-field={key}>
+              <summary>{label}{item.requires_review ? ' · Требует проверки' : ' · Сравнить тексты'}</summary>
+              {item.warnings.map((warning, index) => <p className="info fallback-info" key={index}>{warning}</p>)}
+              {item.requires_review && <p className="muted small">Редакция не применялась автоматически. Перед её использованием проверьте сведения.</p>}
+              <h4>Исходный ответ</h4><p className="preserve">{item.original || 'Не указан'}</p>
+              <h4>Предложено AI</h4><p className="preserve">{item.proposed || 'Не указан'}</p>
+              <div className="actions">
+                <button type="button" className="secondary" onClick={() => change(key, item.original)}>Восстановить исходный ответ</button>
+                {item.original !== item.proposed && <button type="button" className="secondary" onClick={() => change(key, item.proposed)}>Проверил: использовать AI-редакцию</button>}
+              </div>
+            </details>;
+          })}
+        </section>}
         <div className="form-footer">
           <div className="actions">{step > 1 && <button type="button" className="secondary" onClick={() => void run(() => go(step - 1))}>Назад</button>}
             <button type="button" className="quiet" onClick={() => void run(async () => { const result = await save(); notify('Черновик сохранён'); navigate(`task/${result.id}`); })}>Сохранить и выйти</button></div>

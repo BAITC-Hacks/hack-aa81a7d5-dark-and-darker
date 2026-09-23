@@ -25,13 +25,13 @@ export function useWizardDraft(initial?: Task) {
   const { questions, registerGuard, replaceRoute, navigate, notify, refresh } = useHub();
   const [boot] = useState(() => {
     const fields = initial ? Object.fromEntries(Object.keys(emptyFields).map((key) => [key, initial[key as keyof typeof emptyFields]])) as typeof emptyFields : { ...emptyFields };
-    const baseline: WizardState = initial?.wizard_state ?? {
+    const baseline: WizardState = initial?.wizard_state ? { cardReview: null, ...initial.wizard_state } : {
       step: initial ? 4 : 1, fields, originalIdea: { ...fields },
       answers: Object.fromEntries(questions.map(({ field }) => [field, fields[field]])) as Answers,
       questionSet: { questions: questions.map(({ field, question }) => ({ field, question })) },
       hasQuestions: !!initial, hasCard: !!initial,
       questionsIdea: initial ? JSON.stringify([fields.title, fields.initial_description]) : '',
-      questionInfo: null, cardInfo: null,
+      questionInfo: null, cardInfo: null, cardReview: null,
     };
     const recovery = readRecovery(initial?.id);
     const ownPendingWrite = initial && recovery?.revision != null && initial.revision === recovery.revision + 1

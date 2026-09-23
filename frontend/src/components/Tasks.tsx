@@ -4,13 +4,11 @@ import { useAction, useHub } from '../context';
 import { date, levels, type Proposal, type Readiness, type Task } from '../types';
 import { CardContent, Empty, ErrorState, Loading, ReadinessPanel, Score, TeamSelect } from './ui';
 import { ProposalCard, ProposalForm } from './Proposals';
+import { useCatalogFilters } from '../catalogFilters';
 
 export function TasksPage() {
   const { role, navigate, revision } = useHub();
-  const [search, setSearch] = useState('');
-  const [level, setLevel] = useState('');
-  const [sort, setSort] = useState('newest');
-  const [status, setStatus] = useState('');
+  const { filters: { search, level, sort, status }, update, reset } = useCatalogFilters(role);
   const params = new URLSearchParams({ sort, search });
   if (level) params.set('readiness_level', level);
   if (role === 'student') params.set('status', 'published');
@@ -20,10 +18,10 @@ export function TasksPage() {
     <div className="page-heading"><div><p className="eyebrow">БИЗНЕС × СТУДЕНЧЕСКИЕ КОМАНДЫ</p><h1>{role === 'business' ? 'Мои задачи' : 'Каталог задач'}</h1><p className="muted">{role === 'business' ? 'Превратите бизнес-потребность в понятную задачу для талантливых команд.' : 'Реальные бизнес-задачи. Ваши идеи. Первый шаг к совместному проекту.'}</p></div>{role === 'business' && <button onClick={() => navigate('new')}>＋ Создать задачу</button>}</div>
     <div className="catalog-note"><span className="note-icon">✦</span><div><strong>{role === 'business' ? 'Хороший проект начинается с понятной задачи' : 'Выбирайте задачу, в которой можете быть полезны'}</strong><p>Рейтинг показывает полноту описания. Задачи с любым рейтингом открыты для сотрудничества.</p></div></div>
     <div className="toolbar catalog-toolbar">
-      <label className="search">Поиск<input type="search" aria-label="Поиск задач" maxLength={200} placeholder="Название или описание задачи" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
-      <label>Уровень готовности<select value={level} onChange={(event) => setLevel(event.target.value)}><option value="">Все уровни</option>{levels.map((item) => <option key={item}>{item}</option>)}</select></label>
-      {role === 'business' && <label>Статус задачи<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">Все задачи</option><option value="draft">Черновики</option><option value="published">Опубликованы</option></select></label>}
-      <label>Сортировка<select value={sort} onChange={(event) => setSort(event.target.value)}><option value="newest">Сначала новые</option><option value="oldest">Сначала старые</option><option value="score_desc">Рейтинг: по убыванию</option><option value="score_asc">Рейтинг: по возрастанию</option></select></label>
+      <label className="search">Поиск<input type="search" aria-label="Поиск задач" maxLength={200} placeholder="Название или описание задачи" value={search} onChange={(event) => update({ search: event.target.value })} /></label>
+      <label>Уровень готовности<select value={level} onChange={(event) => update({ level: event.target.value })}><option value="">Все уровни</option>{levels.map((item) => <option key={item}>{item}</option>)}</select></label>
+      {role === 'business' && <label>Статус задачи<select value={status} onChange={(event) => update({ status: event.target.value })}><option value="">Все задачи</option><option value="draft">Черновики</option><option value="published">Опубликованы</option></select></label>}
+      <label>Сортировка<select value={sort} onChange={(event) => update({ sort: event.target.value })}><option value="newest">Сначала новые</option><option value="oldest">Сначала старые</option><option value="score_desc">Рейтинг: по убыванию</option><option value="score_asc">Рейтинг: по возрастанию</option></select></label>
     </div>
     {resource.loading ? <Loading /> : resource.error ? <ErrorState message={resource.error} retry={resource.retry} /> : <>
       <p className="result-count">Найдено задач: {resource.data?.length ?? 0}</p>
@@ -31,7 +29,7 @@ export function TasksPage() {
         <div className="task-meta"><span className="organization"><span className="org-icon">S</span>{task.organization}</span><span className={`badge ${task.status}`}>{task.status === 'published' ? 'Опубликована' : 'Черновик'}</span></div>
         <h2><button className="heading-link" onClick={() => navigate(`task/${task.id}`)}>{task.title}</button></h2><p className="task-description">{task.initial_description}</p>
         <div className="task-bottom"><Score score={task.readiness_score} level={task.readiness_level} /><div className="card-footer"><span className="muted small">{date(task.created_at)}</span><button className="text-link" onClick={() => navigate(`task/${task.id}`)}>Подробнее →</button></div></div>
-      </article>)}</div> : <Empty title="Задачи не найдены"><p className="muted">Измените фильтры или поисковый запрос.</p><button className="secondary" onClick={() => { setSearch(''); setLevel(''); setStatus(''); }}>Сбросить фильтры</button></Empty>}
+      </article>)}</div> : <Empty title="Задачи не найдены"><p className="muted">Измените фильтры или поисковый запрос.</p><button className="secondary" onClick={reset}>Сбросить фильтры</button></Empty>}
     </>}
   </>;
 }

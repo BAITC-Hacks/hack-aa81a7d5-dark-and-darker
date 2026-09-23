@@ -124,7 +124,7 @@ class ApiTests(unittest.TestCase):
                 "answers": {item[0]: "" for item in CRITERIA},
                 "questionSet": {"questions": [{"field": item[0], "question": f"Уточнение AI: {item[0]}?"} for item in CRITERIA]},
                 "hasQuestions": True, "hasCard": False, "questionsIdea": "Исходная идея",
-                "questionInfo": {"source": "ai", "reason": None, "message": "Mock AI"}, "cardInfo": None}
+                "questionInfo": {"source": "ai", "reason": None, "message": "Mock AI"}, "cardInfo": None, "cardReview": None}
 
     def test_late_ai_save_conflicts_atomically_with_manual_edit(self):
         state = self.wizard_state()
@@ -138,6 +138,8 @@ class ApiTests(unittest.TestCase):
 
     def test_wizard_persistence_idempotent_creation_and_publication(self):
         state = self.wizard_state()
+        state["cardReview"] = {"constraints": {"original": "Не определены", "proposed": "2 недели",
+                                               "requires_review": True, "warnings": ["Новый срок требует проверки"]}}
         state["answers"]["context"] = "  исходный ответ пользователя  "
         state["fields"]["context"] = "AI-формулировка"
         body = {"client_id": str(uuid4()), "state": state}

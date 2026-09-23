@@ -2,7 +2,7 @@ from uuid import UUID
 
 from pydantic import ConfigDict, Field
 
-from .ai_models import Answers, GenerationInfo, QuestionSet
+from .ai_models import Answers, CardField, FieldReview, GenerationInfo, QuestionSet
 from .models import InputModel, TaskCreate, TaskVersion, Text
 
 
@@ -27,6 +27,7 @@ class WizardState(InputModel):
     questionsIdea: str = Field(max_length=25000)
     questionInfo: GenerationInfo | None = None
     cardInfo: GenerationInfo | None = None
+    cardReview: dict[CardField, FieldReview] | None = None
 
 
 class WizardCreate(InputModel):

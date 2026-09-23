@@ -17,11 +17,14 @@ export type AIQuestion = Pick<Question, 'field' | 'question'>;
 export type Answers = Record<CriterionField, string>;
 export type GenerationInfo = { source: 'ai' | 'fallback'; reason: string | null; message: string };
 export type QuestionsResult = GenerationInfo & { questions: AIQuestion[] };
-export type CardResult = GenerationInfo & { card: TaskFields };
+export type FieldReview = { original: string; proposed: string; requires_review: boolean; warnings: string[] };
+export type CardReview = Partial<Record<keyof TaskFields, FieldReview>>;
+export type CardResult = GenerationInfo & { card: TaskFields; review?: CardReview | null };
 export type WizardState = {
   step: number; fields: TaskFields; originalIdea: TaskFields; answers: Answers;
   questionSet: { questions: AIQuestion[] }; hasQuestions: boolean; hasCard: boolean;
   questionsIdea: string; questionInfo: GenerationInfo | null; cardInfo: GenerationInfo | null;
+  cardReview?: CardReview | null;
 };
 export type Readiness = { score: number; level: string; criteria: { field: CriterionField; label: string; maximum: number; points: number }[]; missing: string[]; recommendations: string[] };
 export const emptyFields: TaskFields = {
