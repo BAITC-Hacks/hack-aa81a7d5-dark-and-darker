@@ -1,0 +1,4 @@
+# Python 3.14: use FastAPI with Pydantic v2 support.
+fastapi>=0.120.0,<1.0
+pydantic>=2.12.0,<3.0
+uvicorn>=0.38.0,<1.0
