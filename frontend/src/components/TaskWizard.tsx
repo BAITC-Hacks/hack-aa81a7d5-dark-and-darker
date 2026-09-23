@@ -114,15 +114,25 @@ function Wizard({ initial }: { initial?: Task }) {
             if (!item) return null;
             const key = name as keyof TaskFields;
             const label = key === 'title' ? 'Название задачи' : key === 'initial_description' ? 'Краткое описание' : questions.find((q) => q.field === key)?.label;
+            const originalSelected = fields[key] === item.original;
+            const aiSelected = !originalSelected && fields[key] === item.proposed;
+            const selected = originalSelected ? 'Исходный ответ' : aiSelected ? 'AI-редакция' : 'Ручная правка';
+            const choose = (original: boolean) => {
+              change(key, original ? item.original : item.proposed);
+              notify(original ? 'Исходный ответ восстановлен' : 'AI-редакция применена');
+            };
             return <details key={key} data-review-field={key}>
-              <summary>{label}{item.requires_review ? ' · Требует проверки' : ' · Сравнить тексты'}</summary>
+              <summary>{label} · {selected}</summary>
+              <p className="review-selection" role="status">Используется: {selected}.</p>
               {item.warnings.map((warning, index) => <p className="info fallback-info" key={index}>{warning}</p>)}
-              {item.requires_review && <p className="muted small">Редакция не применялась автоматически. Перед её использованием проверьте сведения.</p>}
-              <h4>Исходный ответ</h4><p className="preserve">{item.original || 'Не указан'}</p>
-              <h4>Предложено AI</h4><p className="preserve">{item.proposed || 'Не указан'}</p>
+              {item.requires_review && !aiSelected && <p className="muted small">Перед выбором AI-редакции проверьте сведения в ней.</p>}
+              <div className={originalSelected ? 'review-option selected' : 'review-option'}><h4>Исходный ответ</h4><p className="preserve">{item.original || 'Не указан'}</p></div>
+              {item.original !== item.proposed
+                ? <div className={aiSelected ? 'review-option selected' : 'review-option'}><h4>Предложено AI</h4><p className="preserve">{item.proposed || 'Не указан'}</p></div>
+                : <p className="muted small">Исходный ответ и AI-редакция совпадают.</p>}
               <div className="actions">
-                <button type="button" className="secondary" onClick={() => change(key, item.original)}>Восстановить исходный ответ</button>
-                {item.original !== item.proposed && <button type="button" className="secondary" onClick={() => change(key, item.proposed)}>Проверил: использовать AI-редакцию</button>}
+                <button type="button" className="secondary" disabled={originalSelected} aria-pressed={originalSelected} onClick={() => choose(true)}>Восстановить исходный ответ</button>
+                {item.original !== item.proposed && <button type="button" className="secondary" disabled={aiSelected} aria-pressed={aiSelected} onClick={() => choose(false)}>Проверил: использовать AI-редакцию</button>}
               </div>
             </details>;
           })}

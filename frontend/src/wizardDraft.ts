@@ -9,6 +9,9 @@ function fingerprint(value: unknown): string {
     ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]])) : item);
 }
 type Recovery = { clientId: string; revision: number | null; state: WizardState; pendingState?: WizardState };
+type PendingWrite = { expected_revision: number; operation_id: string; state: WizardState };
+const SAVE_TIMEOUT_MS = 30_000;
+const LEAVE_TIMEOUT_MS = 1_000;
 function recoveryKey(id?: number) { return `sana-wizard:${id ?? 'new'}`; }
 function readRecovery(id?: number): Recovery | undefined {
   try {
@@ -49,22 +52,29 @@ export function useWizardDraft(initial?: Task) {
   const baseline = useRef(fingerprint(boot.baseline));
   const blocked = useRef(boot.stale);
   const mounted = useRef(true);
+  const discarded = useRef(false);
   const paused = useRef(false);
   const generation = useRef<AbortController | null>(null);
   const epoch = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const savingRequest = useRef<AbortController | null>(null);
+  const pendingWrite = useRef<PendingWrite | undefined>(undefined);
   const pendingState = useRef<WizardState | undefined>(undefined);
   const pendingGeneration = useRef(false);
+  const pendingGenerationEpoch = useRef<number | undefined>(undefined);
   const latest = useRef({ save, discard, schedule });
   latest.current = { save, discard, schedule };
-  const dirty = fingerprint(state) !== baseline.current;
+  const isDirty = () => !discarded.current && (!!pendingState.current || fingerprint(current.current) !== baseline.current);
+  const dirty = isDirty();
 
   function backup() {
+    if (!mounted.current || discarded.current) return;
     try {
       sessionStorage.setItem(recoveryKey(task.current?.id), JSON.stringify({
         clientId: boot.clientId, revision: task.current?.revision ?? null,
-        state: pendingGeneration.current && pendingState.current ? pendingState.current : current.current,
+        state: pendingGeneration.current && pendingGenerationEpoch.current === epoch.current && pendingState.current
+          ? pendingState.current : current.current,
         pendingState: pendingState.current,
       } satisfies Recovery));
     } catch { /* beforeunload still protects input if browser storage is full. */ }
@@ -81,50 +91,78 @@ export function useWizardDraft(initial?: Task) {
   function persist(next: WizardState, expectedRevision?: number, operationEpoch = epoch.current): Promise<Task> {
     clearTimeout(timer.current);
     const operation = queue.current.catch(() => {}).then(async () => {
-      if (!mounted.current || blocked.current || operationEpoch !== epoch.current) throw cancelled();
+      if (!mounted.current || discarded.current || blocked.current || operationEpoch !== epoch.current) throw cancelled();
+      const recoverGeneration = expectedRevision === undefined && pendingGeneration.current
+        && pendingGenerationEpoch.current === operationEpoch && pendingState.current;
+      if (recoverGeneration) next = recoverGeneration;
       if (expectedRevision !== undefined && task.current?.revision !== expectedRevision) {
         markConflict(); throw new ApiError('Задача уже изменена. Откройте актуальную карточку.', 409);
       }
-      if (task.current && fingerprint(next) === baseline.current) return task.current;
+      if (task.current && !pendingWrite.current && fingerprint(next) === baseline.current) return task.current;
+      const controller = new AbortController();
+      savingRequest.current = controller;
+      let timedOut = false;
+      let succeeded = false;
+      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, SAVE_TIMEOUT_MS);
       setSaving(true);
-      try {
-        const previous = task.current;
-        pendingState.current = next; pendingGeneration.current = expectedRevision !== undefined; backup();
-        const result = previous
-          ? await send<Task>(`/tasks/${previous.id}/wizard`, 'PUT', { expected_revision: expectedRevision ?? previous.revision, state: next })
-          : await send<Task>('/wizard-drafts', 'POST', { client_id: boot.clientId, state: next });
+      const acknowledge = (result: Task) => {
+        if (!mounted.current || discarded.current) throw cancelled();
         task.current = result;
-        if (!mounted.current) return result;
-        if (expectedRevision !== undefined && operationEpoch === epoch.current) {
+        baseline.current = fingerprint(result.wizard_state);
+        setSaved(result); backup();
+      };
+      const write = async (body: PendingWrite) => {
+        pendingWrite.current = body;
+        pendingState.current = body.state; backup();
+        const result = await send<Task>(`/tasks/${task.current!.id}/wizard`, 'PUT', body, controller.signal);
+        acknowledge(result);
+        pendingWrite.current = undefined;
+        return result;
+      };
+      try {
+        pendingGeneration.current = expectedRevision !== undefined || !!recoverGeneration;
+        if (expectedRevision !== undefined) pendingGenerationEpoch.current = operationEpoch;
+        if (!task.current) {
+          pendingState.current = next; backup();
+          const created = await send<Task>('/wizard-drafts', 'POST', { client_id: boot.clientId, state: next }, controller.signal);
+          acknowledge(created);
+          replaceRoute(`new/${created.id}`); removeRecovery();
+          // Creation is already idempotent. Never resume over another writer.
+          if (fingerprint(next) !== baseline.current && created.revision !== 1) {
+            markConflict(); throw new ApiError('Черновик уже изменён. Откройте актуальную карточку.', 409);
+          }
+        }
+        // A lost response leaves an uncertain write. Resolve that exact operation
+        // before attempting any newer local edits, using the same operation ID.
+        if (pendingWrite.current) await write(pendingWrite.current);
+        if (fingerprint(next) !== baseline.current) {
+          await write({ expected_revision: task.current!.revision, operation_id: crypto.randomUUID(), state: next });
+        }
+        if ((expectedRevision !== undefined || recoverGeneration) && operationEpoch === epoch.current) {
           current.current = next; setState(next);
         }
-        setSaved(result);
-        if (!previous) {
-          replaceRoute(`new/${result.id}`);
-          removeRecovery();
-        }
-        baseline.current = fingerprint(result.wizard_state);
-        backup();
-        if (!previous && fingerprint(next) !== baseline.current) {
-          // A retried create may have succeeded before a reload/lost response.
-          // Only its original revision is safe to resume automatically.
-          if (result.revision !== 1) { markConflict(); throw new ApiError('Черновик уже изменён. Откройте актуальную карточку.', 409); }
-          const resumed = await send<Task>(`/tasks/${result.id}/wizard`, 'PUT', { expected_revision: result.revision, state: next });
-          task.current = resumed;
-          baseline.current = fingerprint(resumed.wizard_state);
-          if (mounted.current) { setSaved(resumed); backup(); }
-          return resumed;
-        }
+        succeeded = true;
         setSaveError(''); refresh();
-        return result;
+        return task.current!;
       } catch (failure) {
-        if (mounted.current) {
-          if (failure instanceof ApiError && failure.status === 409) markConflict();
-          else setSaveError(failure instanceof Error ? failure.message : 'Не удалось сохранить черновик');
+        const error = timedOut ? new Error('Сервер не ответил за 30 секунд. Ввод сохранён в этой вкладке. Повторите сохранение.') : failure;
+        if (mounted.current && !discarded.current) {
+          clearTimeout(timer.current); // No automatic retry loop after a failure.
+          if (error instanceof ApiError && error.status === 409) markConflict();
+          else setSaveError(error instanceof Error ? error.message : 'Не удалось сохранить черновик');
         }
-        throw failure;
+        throw error;
       } finally {
-        if (mounted.current) { pendingState.current = undefined; pendingGeneration.current = false; backup(); setSaving(false); }
+        clearTimeout(timeout);
+        if (savingRequest.current === controller) savingRequest.current = null;
+        if (mounted.current && !discarded.current) {
+          // Retain an uncertain request in recovery storage until acknowledged.
+          if (succeeded) { pendingState.current = undefined; pendingGeneration.current = false; }
+          backup(); setSaving(false);
+          // The baseline may have changed while the user reverted to its OLD
+          // value. Always reconsider the latest input after a successful write.
+          if (succeeded) schedule();
+        }
       }
     });
     queue.current = operation;
@@ -132,7 +170,7 @@ export function useWizardDraft(initial?: Task) {
   }
   function schedule() {
     clearTimeout(timer.current);
-    if (paused.current || blocked.current || generation.current || fingerprint(current.current) === baseline.current) return;
+    if (!mounted.current || discarded.current || paused.current || blocked.current || generation.current || fingerprint(current.current) === baseline.current) return;
     if (!task.current && (!current.current.fields.title.trim() || !current.current.fields.initial_description.trim())) return;
     timer.current = setTimeout(() => { void persist(current.current).catch(() => {}); }, 800);
   }
@@ -143,8 +181,15 @@ export function useWizardDraft(initial?: Task) {
     return persist(current.current);
   }
   async function discard() {
+    discarded.current = true;
     paused.current = true; clearTimeout(timer.current); generation.current?.abort(); epoch.current++;
-    await queue.current.catch(() => {});
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([queue.current.catch(() => {}), new Promise<void>((resolve) => {
+        timeout = setTimeout(() => { savingRequest.current?.abort(); resolve(); }, LEAVE_TIMEOUT_MS);
+      })]);
+    } finally { clearTimeout(timeout); }
+    // Aborting the client is not a server rollback. Leave persisted data intact.
     baseline.current = fingerprint(current.current);
     removeRecovery(task.current?.id);
     // Also remove a pre-ID backup if a create response was lost.
@@ -170,7 +215,7 @@ export function useWizardDraft(initial?: Task) {
         if (!mounted.current || controller.signal.aborted || operationEpoch !== epoch.current) throw cancelled();
         current.current = next; setState(next); backup();
       },
-      finish() { if (generation.current === controller) generation.current = null; },
+      finish() { if (generation.current === controller) { generation.current = null; schedule(); } },
     };
   }
 
@@ -178,20 +223,20 @@ export function useWizardDraft(initial?: Task) {
     mounted.current = true;
     latest.current.schedule();
     const unregister = registerGuard({
-      dirty: () => fingerprint(current.current) !== baseline.current,
+      dirty: isDirty,
       pause: () => { paused.current = true; clearTimeout(timer.current); },
       resume: () => { paused.current = false; latest.current.schedule(); },
       save: async () => { generation.current?.abort(); await latest.current.save(); },
       discard: () => latest.current.discard(),
     });
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (fingerprint(current.current) === baseline.current) return;
+      if (!isDirty()) return;
       backup();
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('beforeunload', beforeUnload);
     return () => {
-      mounted.current = false; clearTimeout(timer.current); generation.current?.abort();
+      mounted.current = false; clearTimeout(timer.current); generation.current?.abort(); savingRequest.current?.abort();
       unregister(); window.removeEventListener('beforeunload', beforeUnload);
     };
   }, [registerGuard]);

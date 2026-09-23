@@ -13,6 +13,9 @@ button { overflow-wrap: anywhere; }
 .ai-review { margin-top: 24px; }
 .ai-review details { border-top: 1px solid var(--border); padding: 16px 0; }
 .ai-review summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.review-selection { color: var(--accent); font-size: 14px; font-weight: 600; }
+.review-option { border: 1px solid transparent; border-radius: 10px; padding: 0 12px; margin-bottom: 12px; }
+.review-option.selected { border-color: #d8d1ff; background: #f7f5ff; }
 button, input, select, textarea { font: inherit; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 button { border: 1px solid transparent; border-radius: 9px; background: var(--accent); color: #fff; padding: 11px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s; }

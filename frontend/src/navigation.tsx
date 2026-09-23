@@ -82,6 +82,7 @@ export function useNavigation() {
     <h2 id="leave-title">Сохранить изменения перед выходом?</h2>
     <p>В конструкторе есть несохранённый ввод.</p>
     {error && <p role="alert">{error}</p>}
+    {busy && <p role="status">Завершаем переход…</p>}
     <div className="actions">
       <button disabled={busy} onClick={() => void leave(true)}>Сохранить и выйти</button>
       <button disabled={busy} className="secondary" autoFocus onClick={stay}>Продолжить редактирование</button>

@@ -68,6 +68,12 @@ def initialize_database():
                 client_id TEXT UNIQUE,
                 data TEXT
             );
+            CREATE TABLE IF NOT EXISTS wizard_save_receipts (
+                task_id INTEGER PRIMARY KEY REFERENCES tasks(id),
+                operation_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                result_revision INTEGER NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_proposals_team ON proposals(team_id);
         """)

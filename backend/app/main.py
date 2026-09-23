@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from contextlib import asynccontextmanager
@@ -163,23 +164,41 @@ def save_wizard(task_id: int, body: WizardSave):
     with database(write=True) as db:
         task = get_task(db, task_id)
         require_owner(task)
-        require_revision(task, body.expected_revision)
         state = body.state.model_dump()
-        if task["wizard_state"] == state:
+        request_hash = hashlib.sha256(json.dumps(
+            {"expected_revision": body.expected_revision, "state": state},
+            sort_keys=True, ensure_ascii=False,
+        ).encode()).hexdigest()
+        receipt = db.execute("SELECT * FROM wizard_save_receipts WHERE task_id=?", (task_id,)).fetchone()
+        if body.operation_id and receipt and receipt["operation_id"] == str(body.operation_id):
+            # Acknowledge only this exact write, while its result is still current.
+            # Even a later confirmation makes the old receipt unsafe to resume.
+            if (receipt["request_hash"] != request_hash or receipt["result_revision"] != task["revision"]
+                    or task["wizard_state"] != state):
+                raise HTTPException(409, "Результат операции уже изменён. Откройте актуальную карточку.")
             return task
-        fields = state["fields"]
-        # Even temporarily empty required fields survive reload in the snapshot.
-        values = TaskCreate.model_validate(fields).model_dump() if fields["title"].strip() and fields["initial_description"].strip() else {}
-        changes = {key: value for key, value in values.items() if task[key] != value}
-        previous_fields = (task["wizard_state"] or {}).get("fields", {key: task[key] for key in fields})
-        if changes or fields != previous_fields:
-            readiness = calculate_readiness({**task, **changes})
-            changes.update(is_confirmed=0, status="draft", readiness_score=readiness["score"], readiness_level=readiness["level"])
-        changes.update(revision=task["revision"] + 1, updated_at=now())
-        db.execute(f"UPDATE tasks SET {','.join(key + '=?' for key in changes)} WHERE id=?", (*changes.values(), task_id))
-        db.execute("INSERT INTO wizard_states (task_id,data) VALUES (?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data",
-                   (task_id, body.state.model_dump_json()))
-        return get_task(db, task_id)
+        require_revision(task, body.expected_revision)
+        if task["wizard_state"] != state:
+            fields = state["fields"]
+            # Even temporarily empty required fields survive reload in the snapshot.
+            values = TaskCreate.model_validate(fields).model_dump() if fields["title"].strip() and fields["initial_description"].strip() else {}
+            changes = {key: value for key, value in values.items() if task[key] != value}
+            previous_fields = (task["wizard_state"] or {}).get("fields", {key: task[key] for key in fields})
+            if changes or fields != previous_fields:
+                readiness = calculate_readiness({**task, **changes})
+                changes.update(is_confirmed=0, status="draft", readiness_score=readiness["score"], readiness_level=readiness["level"])
+            changes.update(revision=task["revision"] + 1, updated_at=now())
+            db.execute(f"UPDATE tasks SET {','.join(key + '=?' for key in changes)} WHERE id=?", (*changes.values(), task_id))
+            db.execute("INSERT INTO wizard_states (task_id,data) VALUES (?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data",
+                       (task_id, body.state.model_dump_json()))
+        result = get_task(db, task_id)
+        if body.operation_id:
+            # One receipt per task bounds storage; older operations must conflict.
+            db.execute("""INSERT INTO wizard_save_receipts VALUES (?,?,?,?)
+                          ON CONFLICT(task_id) DO UPDATE SET operation_id=excluded.operation_id,
+                          request_hash=excluded.request_hash, result_revision=excluded.result_revision""",
+                       (task_id, str(body.operation_id), request_hash, result["revision"]))
+        return result
 
 
 @app.post("/api/tasks/{task_id}/confirm", tags=["tasks"])

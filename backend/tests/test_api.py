@@ -27,6 +27,7 @@ class ReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HACKALEM_DB_PATH": str(Path(directory) / "migration.db")}):
             seed_database()
             with database() as db:
+                db.execute("DROP TABLE wizard_save_receipts")
                 db.execute("DROP TABLE wizard_states")
                 db.execute("ALTER TABLE tasks DROP COLUMN revision")
                 before = [dict(row) for row in db.execute("SELECT * FROM tasks")]
@@ -38,6 +39,7 @@ class ReadinessTests(unittest.TestCase):
                 self.assertTrue(all(row.pop("revision") == 1 for row in after))
                 self.assertEqual(before, after)
                 self.assertEqual(proposals, [dict(row) for row in db.execute("SELECT * FROM proposals")])
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM wizard_save_receipts").fetchone()[0], 0)
 
     def test_all_combinations_and_levels(self):
         for included in itertools.product([False, True], repeat=7):
@@ -135,6 +137,47 @@ class ApiTests(unittest.TestCase):
         self.request("PUT", path + "/wizard", {"expected_revision": task["revision"], "state": state}, expected=409)
         self.assertEqual(latest, self.request("GET", path))
         self.assertIsNone(latest["wizard_state"])
+
+    def test_wizard_save_receipt_survives_restart_and_rejects_changed_request(self):
+        state = self.wizard_state()
+        task = self.request("POST", "/wizard-drafts", {"client_id": str(uuid4()), "state": state})
+        path = f'/tasks/{task["id"]}'
+        state["fields"]["context"] = "Выбранный текст"
+        body = {"expected_revision": task["revision"], "operation_id": str(uuid4()), "state": state}
+        saved = self.request("PUT", path + "/wizard", body)
+        self.stop_server()
+        self.start_server()
+        self.assertEqual(saved, self.request("PUT", path + "/wizard", body))
+        self.assertFalse(saved["is_confirmed"])
+        # Matching content alone must never bypass expected_revision.
+        self.request("PUT", path + "/wizard", {**body, "operation_id": str(uuid4())}, expected=409)
+        self.request("PUT", path + "/wizard", {**body, "operation_id": None}, expected=409)
+        self.request("PUT", path + "/wizard", {**body, "expected_revision": saved["revision"]}, expected=409)
+        state["fields"]["context"] = "Другое содержимое с прежним ID"
+        self.request("PUT", path + "/wizard", body, expected=409)
+        self.assertEqual(saved, self.request("GET", path))
+
+    def test_wizard_receipt_cannot_overwrite_another_tab_or_undo_confirmation(self):
+        for action in ("edit", "confirm"):
+            with self.subTest(action=action):
+                state = self.wizard_state()
+                task = self.request("POST", "/wizard-drafts", {"client_id": str(uuid4()), "state": state})
+                path = f'/tasks/{task["id"]}'
+                state["fields"]["context"] = "Первый текст"
+                body = {"expected_revision": task["revision"], "operation_id": str(uuid4()), "state": state}
+                saved = self.request("PUT", path + "/wizard", body)
+                latest = (self.request("PATCH", path, {"expected_revision": saved["revision"], "context": "Вторая вкладка"})
+                          if action == "edit" else self.request("POST", path + "/confirm", {"expected_revision": saved["revision"]}))
+                self.request("PUT", path + "/wizard", body, expected=409)
+                self.assertEqual(latest, self.request("GET", path))
+
+    def test_wizard_noop_receipt_does_not_increment_revision(self):
+        state = self.wizard_state()
+        task = self.request("POST", "/wizard-drafts", {"client_id": str(uuid4()), "state": state})
+        path = f'/tasks/{task["id"]}/wizard'
+        body = {"expected_revision": task["revision"], "operation_id": str(uuid4()), "state": state}
+        self.assertEqual(task, self.request("PUT", path, body))
+        self.assertEqual(task, self.request("PUT", path, body))
 
     def test_wizard_persistence_idempotent_creation_and_publication(self):
         state = self.wizard_state()

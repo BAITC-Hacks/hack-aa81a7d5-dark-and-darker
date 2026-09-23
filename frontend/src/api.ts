@@ -27,8 +27,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return response.json() as Promise<T>;
 }
 
-export const send = <T>(path: string, method: string, body?: unknown) => api<T>(path, {
-  method, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+export const send = <T>(path: string, method: string, body?: unknown, signal?: AbortSignal) => api<T>(path, {
+  method, signal, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
 });
 
 export function useResource<T>(path: string | null, revision = 0) {

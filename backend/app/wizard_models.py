@@ -36,4 +36,5 @@ class WizardCreate(InputModel):
 
 
 class WizardSave(TaskVersion):
+    operation_id: UUID | None = None
     state: WizardState
